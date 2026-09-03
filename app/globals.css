@@ -121,3 +121,124 @@ button { -webkit-tap-highlight-color: transparent; }
   .page { padding-left:24px; padding-right:24px; }
   .card { padding:22px; }
 }
+
+
+/* ===== 班车首页增强：起点分组 + 10 分钟提醒 ===== */
+
+.upcoming-alert {
+  margin-bottom: 16px;
+  border: 1px solid #ffd9a3;
+  border-radius: 18px;
+  padding: 14px;
+  background: linear-gradient(135deg, #fff8e8, #fff3da);
+  box-shadow: 0 10px 28px rgba(180, 112, 20, .08);
+}
+
+.upcoming-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 760;
+  color: #8a4b08;
+  margin-bottom: 10px;
+}
+
+.pulse-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 0 rgba(245, 158, 11, .45);
+  animation: pulseSoon 1.7s infinite;
+}
+
+@keyframes pulseSoon {
+  0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, .45); }
+  70% { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+}
+
+.upcoming-list {
+  display: grid;
+  gap: 8px;
+}
+
+.upcoming-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-radius: 14px;
+  padding: 10px 11px;
+  background: rgba(255,255,255,.76);
+  border: 1px solid rgba(245,158,11,.14);
+}
+
+.upcoming-route {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.upcoming-meta {
+  margin-top: 3px;
+  color: #8b6b42;
+  font-size: 11px;
+}
+
+.upcoming-time {
+  display: grid;
+  justify-items: end;
+  flex: none;
+}
+
+.upcoming-time strong {
+  font-size: 19px;
+  letter-spacing: -.3px;
+}
+
+.upcoming-time span {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #a45f0b;
+  font-weight: 650;
+}
+
+.station-group + .station-group {
+  margin-top: 19px;
+}
+
+.station-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 2px 2px 9px;
+  padding-top: 4px;
+}
+
+.station-title {
+  font-size: 15px;
+  font-weight: 780;
+}
+
+.station-count {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.station-list {
+  display: grid;
+  gap: 11px;
+}
+
+.item-imminent {
+  border-color: rgba(245, 158, 11, .48);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, .07);
+}
+
+.badge.soon {
+  color: #9a5708;
+  background: #fff0cd;
+}
