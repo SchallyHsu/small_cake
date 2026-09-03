@@ -95,7 +95,7 @@ function findReservationForBus(list, bus) {
   return (list || []).find((reservation) => reservationLookupKey(reservation) === wanted) || null;
 }
 
-function BusItem({ bus, actionKey, reserve, nowTick, reservation }) {
+function BusItem({ bus, actionKey, reserve, cancelReservation, nowTick, reservation }) {
   const key = `r-${bus.resourceId}-${bus.period}`;
   const minutes = minutesUntilBus(bus.date, bus.time, nowTick);
   const imminent = minutes >= 0 && minutes <= 10;
@@ -116,13 +116,28 @@ function BusItem({ bus, actionKey, reserve, nowTick, reservation }) {
         <div className="time">{bus.time}</div>
       </div>
       <div className="actions">
-        <button
-          className="btn btn-primary"
-          disabled={Boolean(actionKey) || isReserved}
-          onClick={() => reserve(bus)}
-        >
-          {isReserved ? '已预约' : (actionKey === key ? '预约中…' : '预约')}
-        </button>
+        {isReserved ? (
+          <>
+            <button className="btn" disabled>
+              已预约
+            </button>
+            <button
+              className="btn btn-danger"
+              disabled={Boolean(actionKey)}
+              onClick={() => cancelReservation(reservation)}
+            >
+              {actionKey === `c-${reservation.id}` ? '取消中…' : '取消预约'}
+            </button>
+          </>
+        ) : (
+          <button
+            className="btn btn-primary"
+            disabled={Boolean(actionKey)}
+            onClick={() => reserve(bus)}
+          >
+            {actionKey === key ? '预约中…' : '预约'}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -742,13 +757,23 @@ export default function Home() {
                                 </span>
                               </div>
 
-                              <button
-                                className="btn btn-primary btn-upcoming"
-                                disabled={Boolean(actionKey) || isReserved}
-                                onClick={() => reserve(bus)}
-                              >
-                                {isReserved ? '已预约' : (actionKey === key ? '预约中…' : '马上预约')}
-                              </button>
+                              {isReserved ? (
+                                <button
+                                  className="btn btn-danger btn-upcoming"
+                                  disabled={Boolean(actionKey)}
+                                  onClick={() => cancelReservation(reservation)}
+                                >
+                                  {actionKey === `c-${reservation.id}` ? '取消中…' : '取消预约'}
+                                </button>
+                              ) : (
+                                <button
+                                  className="btn btn-primary btn-upcoming"
+                                  disabled={Boolean(actionKey)}
+                                  onClick={() => reserve(bus)}
+                                >
+                                  {actionKey === key ? '预约中…' : '马上预约'}
+                                </button>
+                              )}
                             </div>
                           </div>
                         );
@@ -804,6 +829,7 @@ export default function Home() {
                               bus={bus}
                               actionKey={actionKey}
                               reserve={reserve}
+                              cancelReservation={cancelReservation}
                               nowTick={nowTick}
                               reservation={reservationMap.get(busReservationKey(bus))}
                             />
