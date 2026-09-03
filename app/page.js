@@ -521,22 +521,13 @@ export default function Home() {
                               余 {bus.remaining} 个名额
                             </div>
                           </div>
-                          <div className="upcoming-actions">
                           <div className="upcoming-time">
                             <strong>{bus.time}</strong>
                             <span>
                               {bus.minutesUntil <= 0 ? '即将发车' : `${bus.minutesUntil} 分钟后`}
                             </span>
                           </div>
-                          <button
-                            className="btn btn-primary btn-upcoming"
-                            disabled={Boolean(actionKey)}
-                            onClick={() => reserve(bus)}
-                          >
-                            {actionKey === `r-${bus.resourceId}-${bus.period}` ? '预约中…' : '马上预约'}
-                          </button>
                         </div>
-                      </div>
                       ))}
                     </div>
                   </div>
@@ -550,7 +541,12 @@ export default function Home() {
                       className="input"
                       min={beijingDateString()}
                       value={date}
-                      onChange={(e) => setDate(e.target.value)}
+                      onChange={(e) => {
+                        setDate(e.target.value);
+                        setBuses([]);
+                        setMessage('');
+                        setError('');
+                      }}
                     />
                   </div>
                   <button

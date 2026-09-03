@@ -23,20 +23,24 @@ function beijingNow() {
   };
 }
 
-function inferStartStation(routeName) {
-  const original = String(routeName || '').trim();
-  const compact = original.replace(/\s+/g, '');
+function normalizeDate(value) {
+  const match = String(value || '').trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (!match) return '';
+  return `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`;
+}
 
-  // 常见路线名优先按明确前缀识别。
+function inferStartStation(routeName) {
+  const compact = String(routeName || '').trim().replace(/\s+/g, '');
+
   for (const station of ['新燕园', '燕园']) {
     if (compact.startsWith(station)) return station;
   }
 
-  // 兼容“起点→终点 / 起点-终点 / 起点至终点 / 起点到终点”等命名。
   for (const separator of ['→', '->', '—', '–', '-', '至', '到']) {
     const index = compact.indexOf(separator);
     if (index > 0) {
-      const candidate = compact.slice(0, index)
+      const candidate = compact
+        .slice(0, index)
         .replace(/^(班车|校车)/, '')
         .replace(/(校区|站)$/g, '');
       if (candidate) return candidate;
@@ -48,13 +52,21 @@ function inferStartStation(routeName) {
 
 export async function GET(request) {
   return withSession(request, async (session) => {
-    const date = new URL(request.url).searchParams.get('date') || '';
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日期格式不正确');
+    const rawDate = new URL(request.url).searchParams.get('date') || '';
+    const date = normalizeDate(rawDate);
+
+    if (!date) throw new Error('日期格式不正确');
 
     const now = beijingNow();
 
-    // “可预约班车”不展示历史日期。
-    if (date < now.date) return ok({ buses: [], now });
+    // 历史日期不属于“可预约班车”。
+    if (date < now.date) {
+      return ok({
+        buses: [],
+        queryDate: date,
+        now,
+      });
+    }
 
     const url = new URL('https://wproc.pku.edu.cn/site/reservation/list-page');
     url.search = new URLSearchParams({
@@ -80,23 +92,29 @@ export async function GET(request) {
           const remaining = Number(slot?.row?.margin || 0);
           if (remaining <= 0) continue;
 
+          // WProc 的 list-page 可能一次返回不止一天的数据。
+          // 这里必须以 slot.abscissa 为准，再严格筛选用户选中的日期。
+          const slotDate = normalizeDate(slot?.abscissa);
+          if (!slotDate || slotDate !== date) continue;
+
           const routeName = String(bus?.name || '');
           const item = {
             routeName,
             startStation: inferStartStation(routeName),
             resourceId: String(bus?.id ?? ''),
-            date: String(slot?.abscissa || date).trim(),
+            date: slotDate,
             time: normalizeTime(slot?.yaxis),
             period: String(slot?.time_id ?? ''),
             remaining,
             status: slot?.row?.status,
           };
 
-          // 始终按北京时间判断是否已经发车。
-          if (item.date < now.date) continue;
-          if (item.date === now.date && item.time <= now.time) continue;
+          // 只有查询“今天”时才过滤已经发车的班次。
+          // 查询未来日期时保留当天全部有余票班次。
+          if (date === now.date && item.time <= now.time) continue;
 
           const key = `${item.date}_${item.time}_${item.resourceId}_${item.period}`;
+
           if (!seen.has(key)) {
             seen.add(key);
             buses.push(item);
@@ -105,7 +123,12 @@ export async function GET(request) {
       }
     }
 
-    buses.sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
-    return ok({ buses, now });
+    buses.sort((a, b) => a.time.localeCompare(b.time));
+
+    return ok({
+      buses,
+      queryDate: date,
+      now,
+    });
   });
 }
