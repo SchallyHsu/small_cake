@@ -14,6 +14,10 @@ async function api(url, options = {}) {
   return data;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function beijingDateString() {
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat('en-US', {
@@ -241,8 +245,9 @@ export default function Home() {
     const key = `r-${bus.resourceId}-${bus.period}`;
     setActionKey(key);
     setError('');
+
     try {
-      await api('/api/reservations/create', {
+      const created = await api('/api/reservations/create', {
         method: 'POST',
         body: JSON.stringify({
           resourceId: bus.resourceId,
@@ -250,8 +255,60 @@ export default function Home() {
           period: bus.period,
         }),
       });
+
       setMessage(`已预约：${bus.routeName} ${bus.date} ${bus.time}`);
-      await Promise.all([loadBuses(), loadReservations()]);
+
+      // 先刷新后台数据，但不要阻塞乘车码弹出。
+      const refreshPromise = Promise.all([
+        loadBuses(),
+        loadReservations(),
+      ]).catch(() => {});
+
+      const reservation = created?.reservation;
+      if (reservation?.id && reservation?.hallAppointmentDataId) {
+        let qrShown = false;
+        let lastQrError = null;
+
+        // WProc 有时刚预约成功时二维码数据还没完全准备好，
+        // 因此短暂重试最多 4 次。
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          try {
+            if (attempt > 0) await sleep(350 * attempt);
+
+            const qrData = await api(
+              `/api/reservations/qrcode?id=${encodeURIComponent(reservation.id)}&dataId=${encodeURIComponent(reservation.hallAppointmentDataId)}`,
+            );
+
+            if (!qrData.code) throw new Error('二维码内容为空');
+
+            const image = await QRCode.toDataURL(qrData.code, {
+              width: 360,
+              margin: 2,
+              errorCorrectionLevel: 'M',
+            });
+
+            setQr({
+              image,
+              title: bus.routeName,
+              subtitle: `${bus.date} ${bus.time}`,
+            });
+
+            qrShown = true;
+            break;
+          } catch (qrError) {
+            lastQrError = qrError;
+          }
+        }
+
+        if (!qrShown) {
+          setMessage(
+            `预约成功：${bus.routeName} ${bus.date} ${bus.time}。乘车码暂时未获取到，可在“我的预约”中再次打开。`,
+          );
+          if (lastQrError) console.warn('预约成功后自动获取乘车码失败:', lastQrError);
+        }
+      }
+
+      await refreshPromise;
     } catch (e) {
       setError(e.message);
     } finally {
