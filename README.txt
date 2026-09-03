@@ -1,19 +1,20 @@
-MCK Helper：已预约状态 + 预约成功自动乘车码 修正版
+MCK Helper：预约状态/取消预约真正修复版
 
-直接替换：
-app/page.js
+必须同时替换两个完整文件：
 
-修复/新增：
-1. 首页加载班车时同时同步“我的预约”。
-2. 按 路线 + 日期 + 时间 判断某个班次是否已经预约。
-3. 已预约车次在普通班车列表中显示“已预约”，预约按钮禁用。
-4. 10 分钟即将发车区域恢复“马上预约”按钮。
-5. 10 分钟区域里的已预约班次也显示“已预约”，不会重复预约。
-6. 新预约成功后，不再优先依赖 launch 接口刚返回的 ID。
-7. 会轮询“我的预约”，找到真实预约记录后，再用真实 id / hallAppointmentDataId 获取二维码。
-8. 成功获取二维码后直接弹出乘车码。
-9. 如果 WProc 同步较慢，会自动短暂重试。
-10. 取消预约后会同时刷新班车列表和预约列表，“已预约”状态会消失。
+1. app/page.js
+2. app/api/reservations/mine/route.js
 
-不需要修改后端 API 文件。
-现有 app/globals.css 已经包含 upcoming-actions / btn-upcoming 样式，因此无需再改 CSS。
+这次修复依据 Marchkov Helper v3.1.7 原版逻辑：
+- 请求 my-list-time status=0 + date_sta/date_end
+- 只把 status == 7 视为已预约
+- 用 resource_id + appointment_tim 精确匹配班次
+- 取消预约使用真实 appointment id + periodList[0].id / hall_appointment_data_id
+
+效果：
+- 可预约班车页面真正识别已预约班次
+- 已预约班次显示“已预约” + “取消预约”
+- 10分钟提醒区已预约班次显示“取消预约”
+- 取消后状态刷新
+- 我的预约继续直接显示二维码
+- 新预约成功后自动弹出二维码

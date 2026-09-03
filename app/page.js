@@ -70,29 +70,70 @@ function normalizeClock(value) {
   return `${match[1].padStart(2, '0')}:${match[2]}`;
 }
 
+function parseAppointmentTime(value) {
+  const match = String(value || '')
+    .trim()
+    .match(/^(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})/);
+
+  if (!match) return null;
+
+  return {
+    date: match[1],
+    time: normalizeClock(match[2]),
+  };
+}
+
 function busReservationKey(bus) {
   return [
-    normalizeRouteName(bus?.routeName),
+    String(bus?.resourceId || '').trim(),
     String(bus?.date || '').trim(),
     normalizeClock(bus?.time),
   ].join('|');
 }
 
 function reservationLookupKey(reservation) {
-  const appointmentTime = String(reservation?.appointmentTime || '').trim();
-  const match = appointmentTime.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})/);
-  if (!match) return '';
+  const parsed = parseAppointmentTime(reservation?.appointmentTime);
+  const resourceId = String(reservation?.resourceId || '').trim();
 
-  return [
-    normalizeRouteName(reservation?.resourceName),
-    match[1],
-    normalizeClock(match[2]),
-  ].join('|');
+  if (resourceId && parsed) {
+    return [resourceId, parsed.date, parsed.time].join('|');
+  }
+
+  if (parsed) {
+    return [
+      normalizeRouteName(reservation?.resourceName),
+      parsed.date,
+      parsed.time,
+    ].join('|');
+  }
+
+  return '';
 }
 
 function findReservationForBus(list, bus) {
-  const wanted = busReservationKey(bus);
-  return (list || []).find((reservation) => reservationLookupKey(reservation) === wanted) || null;
+  const exactKey = busReservationKey(bus);
+  const exact = (list || []).find(
+    (reservation) => reservationLookupKey(reservation) === exactKey,
+  );
+
+  if (exact) return exact;
+
+  const fallbackKey = [
+    normalizeRouteName(bus?.routeName),
+    String(bus?.date || '').trim(),
+    normalizeClock(bus?.time),
+  ].join('|');
+
+  return (list || []).find((reservation) => {
+    const parsed = parseAppointmentTime(reservation?.appointmentTime);
+    if (!parsed) return false;
+
+    return [
+      normalizeRouteName(reservation?.resourceName),
+      parsed.date,
+      parsed.time,
+    ].join('|') === fallbackKey;
+  }) || null;
 }
 
 function BusItem({ bus, actionKey, reserve, cancelReservation, nowTick, reservation }) {
@@ -334,9 +375,21 @@ export default function Home() {
     try {
       const d = await api('/api/reservations/mine');
       const list = d.reservations || [];
-      setReservations(list);
-      loadReservationQrs(list).catch(() => {});
-      return list;
+      const reserved = d.reservedBuses || [];
+
+      const merged = [...list];
+      const ids = new Set(merged.map((item) => item.id));
+
+      for (const item of reserved) {
+        if (!ids.has(item.id)) {
+          merged.push(item);
+          ids.add(item.id);
+        }
+      }
+
+      setReservations(merged);
+      loadReservationQrs(merged).catch(() => {});
+      return merged;
     } catch (e) {
       setError(e.message);
       if (e.message.includes('登录')) setLoggedIn(false);
@@ -373,7 +426,17 @@ export default function Home() {
 
         try {
           const d = await api('/api/reservations/mine');
-          freshReservations = d.reservations || [];
+          freshReservations = [
+            ...(d.reservations || []),
+            ...(d.reservedBuses || []),
+          ];
+
+          const uniqueById = new Map();
+          for (const item of freshReservations) {
+            if (item?.id) uniqueById.set(item.id, item);
+          }
+          freshReservations = [...uniqueById.values()];
+
           setReservations(freshReservations);
 
           matchedReservation = findReservationForBus(freshReservations, bus);
