@@ -60,10 +60,46 @@ function inferStartStation(routeName) {
   return '其他起点';
 }
 
-function BusItem({ bus, actionKey, reserve, nowTick }) {
+function normalizeRouteName(value) {
+  return String(value || '').trim().replace(/\s+/g, '');
+}
+
+function normalizeClock(value) {
+  const match = String(value || '').match(/(\d{1,2}):(\d{2})/);
+  if (!match) return '';
+  return `${match[1].padStart(2, '0')}:${match[2]}`;
+}
+
+function busReservationKey(bus) {
+  return [
+    normalizeRouteName(bus?.routeName),
+    String(bus?.date || '').trim(),
+    normalizeClock(bus?.time),
+  ].join('|');
+}
+
+function reservationLookupKey(reservation) {
+  const appointmentTime = String(reservation?.appointmentTime || '').trim();
+  const match = appointmentTime.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})/);
+  if (!match) return '';
+
+  return [
+    normalizeRouteName(reservation?.resourceName),
+    match[1],
+    normalizeClock(match[2]),
+  ].join('|');
+}
+
+function findReservationForBus(list, bus) {
+  const wanted = busReservationKey(bus);
+  return (list || []).find((reservation) => reservationLookupKey(reservation) === wanted) || null;
+}
+
+function BusItem({ bus, actionKey, reserve, nowTick, reservation }) {
   const key = `r-${bus.resourceId}-${bus.period}`;
   const minutes = minutesUntilBus(bus.date, bus.time, nowTick);
   const imminent = minutes >= 0 && minutes <= 10;
+  const isReserved = Boolean(reservation);
 
   return (
     <div className={`item ${imminent ? 'item-imminent' : ''}`}>
@@ -73,14 +109,19 @@ function BusItem({ bus, actionKey, reserve, nowTick }) {
           <div className="meta">
             <span>{bus.date}</span>
             <span className="badge ok">余 {bus.remaining}</span>
+            {isReserved && <span className="badge ok">已预约</span>}
             {imminent && <span className="badge soon">{minutes <= 0 ? '即将发车' : `${minutes} 分钟后`}</span>}
           </div>
         </div>
         <div className="time">{bus.time}</div>
       </div>
       <div className="actions">
-        <button className="btn btn-primary" disabled={Boolean(actionKey)} onClick={() => reserve(bus)}>
-          {actionKey === key ? '预约中…' : '预约'}
+        <button
+          className="btn btn-primary"
+          disabled={Boolean(actionKey) || isReserved}
+          onClick={() => reserve(bus)}
+        >
+          {isReserved ? '已预约' : (actionKey === key ? '预约中…' : '预约')}
         </button>
       </div>
     </div>
@@ -110,6 +151,7 @@ export default function Home() {
   const [resBusy, setResBusy] = useState(false);
   const [actionKey, setActionKey] = useState('');
   const [qr, setQr] = useState(null);
+  const [reservationQrs, setReservationQrs] = useState({});
   const [nowTick, setNowTick] = useState(Date.now());
 
   useEffect(() => {
@@ -121,7 +163,10 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (loggedIn && tab === 'buses') loadBuses();
+    if (loggedIn && tab === 'buses') {
+      loadBuses();
+      loadReservations({ silent: true });
+    }
     if (loggedIn && tab === 'mine') loadReservations();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loggedIn, tab]);
@@ -227,17 +272,62 @@ export default function Home() {
     }
   }
 
-  async function loadReservations() {
-    setResBusy(true);
+  async function buildReservationQr(reservation) {
+    if (!reservation?.id || !reservation?.hallAppointmentDataId) return null;
+
+    const d = await api(
+      `/api/reservations/qrcode?id=${encodeURIComponent(reservation.id)}&dataId=${encodeURIComponent(reservation.hallAppointmentDataId)}`,
+    );
+
+    if (!d.code) throw new Error('二维码内容为空');
+
+    return QRCode.toDataURL(d.code, {
+      width: 320,
+      margin: 2,
+      errorCorrectionLevel: 'M',
+    });
+  }
+
+  async function loadReservationQrs(list) {
+    const targets = (list || []).filter(
+      (reservation) => reservation?.id && reservation?.hallAppointmentDataId,
+    );
+
+    if (targets.length === 0) {
+      setReservationQrs({});
+      return;
+    }
+
+    const results = await Promise.all(
+      targets.map(async (reservation) => {
+        try {
+          const image = await buildReservationQr(reservation);
+          return [reservation.id, { image, error: '' }];
+        } catch (e) {
+          return [reservation.id, { image: '', error: e.message || '乘车码加载失败' }];
+        }
+      }),
+    );
+
+    setReservationQrs(Object.fromEntries(results));
+  }
+
+  async function loadReservations({ silent = false } = {}) {
+    if (!silent) setResBusy(true);
     setError('');
+
     try {
       const d = await api('/api/reservations/mine');
-      setReservations(d.reservations || []);
+      const list = d.reservations || [];
+      setReservations(list);
+      loadReservationQrs(list).catch(() => {});
+      return list;
     } catch (e) {
       setError(e.message);
       if (e.message.includes('登录')) setLoggedIn(false);
+      return [];
     } finally {
-      setResBusy(false);
+      if (!silent) setResBusy(false);
     }
   }
 
@@ -258,25 +348,42 @@ export default function Home() {
 
       setMessage(`已预约：${bus.routeName} ${bus.date} ${bus.time}`);
 
-      // 先刷新后台数据，但不要阻塞乘车码弹出。
-      const refreshPromise = Promise.all([
-        loadBuses(),
-        loadReservations(),
-      ]).catch(() => {});
+      let matchedReservation = null;
+      let freshReservations = [];
 
-      const reservation = created?.reservation;
-      if (reservation?.id && reservation?.hallAppointmentDataId) {
+      // 预约成功后，以“我的预约”返回的真实记录为准。
+      // WProc 偶尔需要一点时间才把新预约放入列表，因此进行短暂轮询。
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        if (attempt > 0) await sleep(450);
+
+        try {
+          const d = await api('/api/reservations/mine');
+          freshReservations = d.reservations || [];
+          setReservations(freshReservations);
+
+          matchedReservation = findReservationForBus(freshReservations, bus);
+          if (matchedReservation) break;
+        } catch (pollError) {
+          console.warn('刷新预约列表失败:', pollError);
+        }
+      }
+
+      // 更新班车余票和“已预约”状态。
+      loadBuses().catch(() => {});
+
+      // 优先使用“我的预约”里的真实 ID；找不到时才回退到 launch 返回值。
+      const qrReservation = matchedReservation || created?.reservation || null;
+
+      if (qrReservation?.id && qrReservation?.hallAppointmentDataId) {
         let qrShown = false;
         let lastQrError = null;
 
-        // WProc 有时刚预约成功时二维码数据还没完全准备好，
-        // 因此短暂重试最多 4 次。
-        for (let attempt = 0; attempt < 4; attempt += 1) {
-          try {
-            if (attempt > 0) await sleep(350 * attempt);
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          if (attempt > 0) await sleep(450);
 
+          try {
             const qrData = await api(
-              `/api/reservations/qrcode?id=${encodeURIComponent(reservation.id)}&dataId=${encodeURIComponent(reservation.hallAppointmentDataId)}`,
+              `/api/reservations/qrcode?id=${encodeURIComponent(qrReservation.id)}&dataId=${encodeURIComponent(qrReservation.hallAppointmentDataId)}`,
             );
 
             if (!qrData.code) throw new Error('二维码内容为空');
@@ -306,9 +413,11 @@ export default function Home() {
           );
           if (lastQrError) console.warn('预约成功后自动获取乘车码失败:', lastQrError);
         }
+      } else {
+        setMessage(
+          `预约成功：${bus.routeName} ${bus.date} ${bus.time}。预约记录正在同步，可在“我的预约”中查看。`,
+        );
       }
-
-      await refreshPromise;
     } catch (e) {
       setError(e.message);
     } finally {
@@ -329,9 +438,38 @@ export default function Home() {
         }),
       });
       setMessage(`已取消：${r.resourceName}`);
-      await loadReservations();
+      setReservationQrs((current) => {
+        const next = { ...current };
+        delete next[r.id];
+        return next;
+      });
+      await Promise.all([
+        loadReservations(),
+        loadBuses(),
+      ]);
     } catch (e) {
       setError(e.message);
+    } finally {
+      setActionKey('');
+    }
+  }
+
+  async function reloadInlineQr(r) {
+    const key = `inline-q-${r.id}`;
+    setActionKey(key);
+    setError('');
+
+    try {
+      const image = await buildReservationQr(r);
+      setReservationQrs((current) => ({
+        ...current,
+        [r.id]: { image, error: '' },
+      }));
+    } catch (e) {
+      setReservationQrs((current) => ({
+        ...current,
+        [r.id]: { image: '', error: e.message || '乘车码加载失败' },
+      }));
     } finally {
       setActionKey('');
     }
@@ -360,6 +498,17 @@ export default function Home() {
   }
 
   const titleName = useMemo(() => user?.name || username || '已登录', [user, username]);
+
+  const reservationMap = useMemo(() => {
+    const map = new Map();
+
+    for (const reservation of reservations) {
+      const key = reservationLookupKey(reservation);
+      if (key) map.set(key, reservation);
+    }
+
+    return map;
+  }, [reservations]);
 
   const upcomingBuses = useMemo(
     () => buses
@@ -565,27 +714,45 @@ export default function Home() {
                       10 分钟内有班车即将发车
                     </div>
                     <div className="upcoming-list">
-                      {upcomingBuses.map((bus) => (
-                        <div
-                          className="upcoming-row"
-                          key={`soon-${bus.resourceId}-${bus.period}-${bus.date}`}
-                        >
-                          <div>
-                            <div className="upcoming-route">
-                              {bus.startStation || inferStartStation(bus.routeName)} · {bus.routeName}
+                      {upcomingBuses.map((bus) => {
+                        const reservation = reservationMap.get(busReservationKey(bus));
+                        const key = `r-${bus.resourceId}-${bus.period}`;
+                        const isReserved = Boolean(reservation);
+
+                        return (
+                          <div
+                            className="upcoming-row"
+                            key={`soon-${bus.resourceId}-${bus.period}-${bus.date}`}
+                          >
+                            <div>
+                              <div className="upcoming-route">
+                                {bus.startStation || inferStartStation(bus.routeName)} · {bus.routeName}
+                              </div>
+                              <div className="upcoming-meta">
+                                余 {bus.remaining} 个名额
+                                {isReserved ? ' · 已预约' : ''}
+                              </div>
                             </div>
-                            <div className="upcoming-meta">
-                              余 {bus.remaining} 个名额
+
+                            <div className="upcoming-actions">
+                              <div className="upcoming-time">
+                                <strong>{bus.time}</strong>
+                                <span>
+                                  {bus.minutesUntil <= 0 ? '即将发车' : `${bus.minutesUntil} 分钟后`}
+                                </span>
+                              </div>
+
+                              <button
+                                className="btn btn-primary btn-upcoming"
+                                disabled={Boolean(actionKey) || isReserved}
+                                onClick={() => reserve(bus)}
+                              >
+                                {isReserved ? '已预约' : (actionKey === key ? '预约中…' : '马上预约')}
+                              </button>
                             </div>
                           </div>
-                          <div className="upcoming-time">
-                            <strong>{bus.time}</strong>
-                            <span>
-                              {bus.minutesUntil <= 0 ? '即将发车' : `${bus.minutesUntil} 分钟后`}
-                            </span>
-                          </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -638,6 +805,7 @@ export default function Home() {
                               actionKey={actionKey}
                               reserve={reserve}
                               nowTick={nowTick}
+                              reservation={reservationMap.get(busReservationKey(bus))}
                             />
                           ))}
                         </div>
@@ -664,34 +832,79 @@ export default function Home() {
                   ) : reservations.length === 0 ? (
                     <div className="empty">当前没有预约</div>
                   ) : (
-                    reservations.map((r) => (
-                      <div className="item" key={r.id}>
-                        <div className="item-top">
-                          <div>
-                            <div className="route">{r.resourceName}</div>
-                            <div className="meta">
-                              <span>{r.appointmentTime}</span>
+                    reservations.map((r) => {
+                      const inlineQr = reservationQrs[r.id];
+
+                      return (
+                        <div className="item" key={r.id}>
+                          <div className="item-top">
+                            <div>
+                              <div className="route">{r.resourceName}</div>
+                              <div className="meta">
+                                <span>{r.appointmentTime}</span>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                        <div className="actions">
-                          <button
-                            className="btn"
-                            disabled={Boolean(actionKey)}
-                            onClick={() => showQr(r)}
+
+                          <div
+                            style={{
+                              display: 'grid',
+                              justifyItems: 'center',
+                              gap: 10,
+                              marginTop: 14,
+                              padding: 14,
+                              borderRadius: 14,
+                              background: 'rgba(255,255,255,0.04)',
+                            }}
                           >
-                            {actionKey === `q-${r.id}` ? '获取中…' : '乘车码'}
-                          </button>
-                          <button
-                            className="btn btn-danger"
-                            disabled={Boolean(actionKey)}
-                            onClick={() => cancelReservation(r)}
-                          >
-                            {actionKey === `c-${r.id}` ? '取消中…' : '取消预约'}
-                          </button>
+                            {!inlineQr ? (
+                              <div className="empty" style={{ padding: 10 }}>
+                                正在加载乘车码…
+                              </div>
+                            ) : inlineQr.image ? (
+                              <>
+                                <img
+                                  src={inlineQr.image}
+                                  alt={`${r.resourceName} 乘车二维码`}
+                                  style={{
+                                    width: 'min(280px, 82vw)',
+                                    height: 'auto',
+                                    display: 'block',
+                                    borderRadius: 12,
+                                    background: '#fff',
+                                    padding: 8,
+                                  }}
+                                />
+                                <div className="user-meta">乘车码已自动加载</div>
+                              </>
+                            ) : (
+                              <>
+                                <div className="notice notice-error" style={{ width: '100%', margin: 0 }}>
+                                  {inlineQr.error || '乘车码加载失败'}
+                                </div>
+                                <button
+                                  className="btn"
+                                  disabled={Boolean(actionKey)}
+                                  onClick={() => reloadInlineQr(r)}
+                                >
+                                  {actionKey === `inline-q-${r.id}` ? '重新加载中…' : '重新加载乘车码'}
+                                </button>
+                              </>
+                            )}
+                          </div>
+
+                          <div className="actions">
+                            <button
+                              className="btn btn-danger"
+                              disabled={Boolean(actionKey)}
+                              onClick={() => cancelReservation(r)}
+                            >
+                              {actionKey === `c-${r.id}` ? '取消中…' : '取消预约'}
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               </section>
